@@ -1,4 +1,5 @@
 import json
+from asgiref.sync import sync_to_async
 from django.shortcuts import render
 # Create your views here.
 import requests
@@ -8,6 +9,8 @@ import cv2
 from rest_framework import viewsets
 from rest_framework import permissions
 from rest_framework.response import Response
+from rest_framework.decorators import action
+
 
 from .serializers import ManageCameraSerializer
 from .ip_cam_manager import CameraManagement
@@ -30,6 +33,7 @@ from .ip_cam_manager import CameraManagement
 
 
 class CameraViewSet(viewsets.ViewSet):
+
     def list(self, request):
         # This gets the data returns a serialized response
         # Get all cameras and extract the information
@@ -58,7 +62,29 @@ class CameraViewSet(viewsets.ViewSet):
         pass
 
     def destroy(self, request, pk=None):
-        pass
+        print(f"Destroying ", request.data)
+        res = CameraManagement().remove_camera(request.data)
+        return Response(f"Camera successfully destroyed: {res}")
+
+    @action(detail=False, methods=['post'])
+    def toggle_flash(self, request, pk=None):
+        print(f'Toggling {request.data}')
+        toggle_state = CameraManagement().call_camera(request.data, 'toggle_flash')
+        print("Viewset, toggle flash res: ", toggle_state)
+        return Response(toggle_state)
+
+    @action(detail=False, methods=['post'])
+    def start_recording(self, request, pk=None):
+        print(f'Recording {request.data}')
+        res = CameraManagement().call_camera(request.data, 'manual_record')
+        print("RES: ", res)
+        return Response(res)
+
+    @action(detail=False, methods=['post'])
+    def stop_recording(self, request, pk=None):
+        print(f'Stopped recording {request.data}')
+        res = CameraManagement().call_camera(request.data, 'stop_manual_record')
+        return Response(res)
 
 
 # def index(request):
