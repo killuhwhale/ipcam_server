@@ -17,6 +17,24 @@ const get = (url, cache = 'no-cache') => {
     })
 }
 
+const getVideo = (url) => {
+    return new Promise((resolve, reject) => {
+        fetch(url, {
+            headers: {
+                "Content-Type": "video/x-msvideo",
+            },
+        })
+            .then(async res => {
+                resolve(res.blob())
+            })
+            .catch(err => {
+                console.log(err)
+                reject(err)
+            })
+    })
+}
+
+
 
 const post = (url, data) => {
     return new Promise((resolve, reject) => {
@@ -51,4 +69,38 @@ const post = (url, data) => {
     })
 }
 
-export { get, post }
+
+const del_ete = (url, data) => {
+    return new Promise((resolve, reject) => {
+        fetch(url, {
+            method: "DELETE",
+            mode: "cors",
+            // cache: "no-cache",
+            credentials: "same-origin",
+            headers: {
+                "Content-Type": "application/json",
+                //   "Authorization": `Bearer ${token}`,
+            },
+            redirect: "follow",
+            refferrerPolicy: "no-referrer",
+            body: JSON.stringify(data)
+        })
+            .then(async (res) => {
+
+                if (res.status === 403) {
+                    // console.log("403 but client should see error", errorData)
+                    resolve("403 brooooo")
+                } else {
+                    // Normal request
+                    resolve(res.json())
+                }
+            })
+            .catch(err => {
+                console.log(err)
+                reject(err)
+            })
+
+    })
+}
+
+export { get, post, del_ete, getVideo }

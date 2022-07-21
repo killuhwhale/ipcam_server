@@ -1,7 +1,9 @@
 import cv2
+from datetime import datetime
 import json
 from multiprocessing import Queue, Process, Manager
 import os
+import re
 import requests
 import signal
 import sys
@@ -13,6 +15,64 @@ from .utils import Singleton
 
 # instead of running all these classes on the same thread, run on separate threads....
 # Then to call each method, send a command to run the comand.
+
+RECORD_DIR = "recordings"
+
+
+def name(url: str):
+    return url.split("//")[1].replace(".", "-")
+
+
+class CameraFiles:
+    def __init__(self, url_name: str):
+        self.url_name = url_name
+        self.path_re = re.compile(
+            rf"{url_name}",  re.IGNORECASE | re.VERBOSE)
+
+    def _add_date_to_filename(self, name):
+        #  192-168-0-181_1658366308.avi
+        new_name = name
+        try:
+            under_split = name.split("_")
+            dot_split = under_split[1].split(".")
+
+            url = under_split[0]
+            fileext = dot_split[1]
+            ts = dot_split[0]
+
+            date = datetime.fromtimestamp(int(ts))
+            new_name = f"{url}_{date.strftime('%d-%m-%Y-%-H:%M:%S')}.{fileext}"
+            print("New name: ", new_name)
+        except Exception as e:
+            print("Failed adding date to filename: ", e)
+        return new_name
+
+    def remove_video(self, filename) -> bool:
+
+        # {"url":  "http://192.168.0.181", "filename": "192-168-0-181_1658374145.avi"}
+        if not filename[-4:] == ".avi":
+            print("Invalid filename to remove: ", filename, filename[-4:])
+            return
+        try:
+            os.remove(f"{RECORD_DIR}/{filename}")
+            return True
+        except Exception as e:
+            print("Failed to remove video: ", e)
+
+        return False
+
+    def get_videos(self):
+        print("Getting video files for: ", self.path_re)
+        filenames = {}
+        for file in os.scandir(f"{RECORD_DIR}/"):
+            if file.is_file():
+                print("Found file: ", file.name)
+                m = re.match(self.path_re, file.name)
+                if m:
+                    filenames[file.name] = (
+                        self._add_date_to_filename(file.name))
+
+        return filenames
 
 
 class ManageCamera:
@@ -28,18 +88,21 @@ class ManageCamera:
 
     '''
 
-    def __init__(self, url, monitor, record) -> None:
+    def __init__(self, url, monitor, record, camera_files) -> None:
         self.url = url
         self.config = {}
         self.videos = []
+        self.camera_files: CameraFiles = camera_files
+
         self.manager_queue_in = None  # Parent queue, communicate w/ CameraManagement
         self.manager_queue_out = None  # Parent queue, communicate w/ CameraManagement
         self.monitor_camera = monitor
         self.monitor = None  # Process
         self.record_camera = record
         self.record = None  # Process
+        self.url_name = name(self.url)
 
-        self.config_path = f'{self.CONFIG_PATH}/{self.name()}_config.json'
+        self.config_path = f'{self.CONFIG_PATH}/{self.url_name}_config.json'
         self._q_manage = Queue()  # This class's queue so children can put messages on it
         # Record class's queue so this class or monitor class can put messages on it
         self._q_record = Queue()
@@ -49,14 +112,17 @@ class ManageCamera:
         self.load_config()
 
     def get_info(self):
-        return [self.config, self.name(), self.config_path]
+        return [self.config, self.url, self.config_path]
 
     def get_videos(self) -> List:
         # Fetch list of video filename from filesystem
-        pass
+        print("CameraManager: get_videos")
+        return self.camera_files.get_videos()
 
-    def name(self):
-        return self.url.split("//")[1]
+    def remove_video(self, filename) -> List:
+        # Fetch list of video filename from filesystem
+        print("CameraManager: get_videos")
+        return self.camera_files.remove_video(filename)
 
     def _update_config(self):
         with open(self.config_path, "w") as f:
@@ -90,7 +156,11 @@ class ManageCamera:
         print("Flash should be going: ", on_or_off,
               f"{self.url}/?flash={ on_or_off }")
         # Send req to ipcam
-        requests.get(f"{self.url}/?flash={ on_or_off }")
+        try:
+            requests.get(f"{self.url}/?flash={ on_or_off }")
+        except Exception as e:
+            print("Failed to toggle flash: ", e)
+
         self._update_config()                                    # Update user config
         # Return the state of the flash
         return self.config['flash']
@@ -119,7 +189,7 @@ class ManageCamera:
             target=self.monitor_camera.start, args=(self._q_record, self.url))
         self.monitor.start()
         self.record = Process(
-            target=self.record_camera.start, args=(self.name(), self._q_record, self._q_manage, self.url))
+            target=self.record_camera.start, args=(self.url, self._q_record, self._q_manage))
         self.record.start()
 
         # TODO refine the calling to each method .
@@ -139,9 +209,11 @@ class ManageCamera:
         
         '''
         while True:
-            method = self.manager_queue_in.get()
+            method, data = self.manager_queue_in.get()
             if method == "get_videos":
                 self.manager_queue_out.put(self.get_videos())
+            elif method == "remove_video":
+                self.manager_queue_out.put(self.remove_video(data))
             elif method == "manual_record":
                 self.manager_queue_out.put(self.manual_record())
             elif method == "stop_manual_record":
@@ -152,6 +224,7 @@ class ManageCamera:
             elif method == "get_info":
                 print("Getting camera info")
                 self.manager_queue_out.put(self.get_info())
+
             method = ""
 
     def _sigTerm(self) -> None:
@@ -176,20 +249,23 @@ class RecordCamera:
     REC_TIME = 10
 
     def __init__(self):
-        self._name = None
         self.is_rec = False
         self.start_time_elapsed = 0  # seconds
         self.writer = None
         self.img = None
         self.url = None
+        self.url_name = None
         self.record_queue = None
         self.cap = None
         self.manual_rec = False
         self.manage_queue = None
         self.video_endpoint = "video.mjpg"
         # Possibly make this a setting if network conditions affect recordings...
-        self.rec_fps = 2
-        self.record_dir = "recordings"
+        self.rec_fps = 4
+        self.record_dir = RECORD_DIR
+
+    def record_path(self):
+        return f'{self.record_dir}/{self.url_name}_{int(time())}.avi'
 
     def get_writer(self):
         if self.is_rec and self.writer:
@@ -197,23 +273,27 @@ class RecordCamera:
 
         self.writer = cv2.VideoWriter(
             # f'{self._name}/output_{int(time())}.avi', cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'), 15, (self.img.shape[1], self.img.shape[0]))
-            f'{self.record_dir}/output_{int(time())}.avi', cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'), self.rec_fps, (self.img.shape[1], self.img.shape[0]))
+            self.record_path(), cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'), self.rec_fps, (self.img.shape[1], self.img.shape[0]))
 
         return self.writer
 
     def check_cap(self):
         ret = False
-        # print("Checking cap")
-        if self.cap is None or not self.cap.isOpened():
+
+        if self.cap is None:
             self.cap = cv2.VideoCapture(f"{self.url}/{self.video_endpoint}")
             print("Checking cap ret is None: ", self.url, ret)
+
+        if not self.cap.isOpened():
+            self.cap = cv2.VideoCapture(f"{self.url}/{self.video_endpoint}")
+            print("Checking cap ret is not opened: ", self.url, ret)
 
         ret, self.img = self.cap.read()
         return ret
 
-    def start(self, name, record_queue: Queue, manage_queue: Queue,  url: str):
-        self._name = name
+    def start(self, url: str, record_queue: Queue, manage_queue: Queue):
         self.url = url
+        self.url_name = name(url)
         self.record_queue = record_queue
         self.manage_queue = manage_queue
         self.check_cap()
@@ -390,24 +470,26 @@ class CameraManagement(metaclass=Singleton):
     def list_cameras(self) -> List[ManageCamera]:
         # return sorted(self.cameras.keys())
         cams = []
-        for url in self.cameras.keys():
+        for url_name in self.cameras.keys():
             # Access the output queue of the camera and wait 2 sec max for it to put a response
             try:
-                info = self.call_camera(url, 'get_info')
+                print("List cameras: ", url_name)
+                info = self.call_camera(
+                    None, 'get_info', data=None, url_name=url_name)
                 # dict: {flash: on/off, vid_path: ""}
                 print("Camera info: ", info)
                 cams.append({
-                    'url': url,
+                    'url': info[1],
                     'config': info[0],
                     'videos': [info[1]],
                 })
-            except:
-                print(f"Failed to get camera info: {url}")
+            except Exception as e:
+                print(
+                    f"Failed to get camera info: {url_name} ", e.with_traceback(None))
         return cams
 
     def add_camera(self, url) -> None:
-        if url in self.cameras:
-            return
+
         self._start_cam(url)
 
         # Write url to file
@@ -415,28 +497,51 @@ class CameraManagement(metaclass=Singleton):
             f.write(f"{url}\n")
 
     def _start_cam(self, url):
+        ''' Starts the ManageCamera thread which starts the RecordCamera and MonitorCamera processess.
 
-        cam = ManageCamera(url, MonitorCamera(), RecordCamera())
+            camera => (input queue, output queue, ManageCamera )
+            manager_queue_in => send to ManageCamera
+            manager_queue_out => Coming from ManageCamera
+        '''
+        url_name = name(url)
+        if url_name in self.cameras:
+            return
+
+        cam = ManageCamera(url, MonitorCamera(),
+                           RecordCamera(), CameraFiles(url_name))
         manager_queue_in = Queue()
         manager_queue_out = Queue()
         cam_thread = Thread(target=cam.begin, args=(
             manager_queue_in, manager_queue_out,))
         cam_thread.start()
         # Send message into, read message from, instance of thread
-        self.cameras[url] = (manager_queue_in, manager_queue_out, cam_thread)
+        self.cameras[url_name] = (manager_queue_in,
+                                  manager_queue_out, cam_thread)
 
     # instead of getting a camera and accessing its methods, send a command to its queue
-    def call_camera(self, url, method) -> ManageCamera:
+    def call_camera(self, url, method, data=None, url_name=None) -> ManageCamera:
         print(f"Calling {method} for cam @ {url}")
-        q_in = self.cameras[url][0]
-        q_out = self.cameras[url][1]
-        q_in.put(method)
+
+        if url_name is None and url is not None:
+            print(url)
+            url_name = name(url)
+
+        try:
+            print(self.cameras)
+            q_in = self.cameras[url_name][0]
+            q_out = self.cameras[url_name][1]
+            q_in.put((method, data))
+        except Exception as e:
+            print(f"Failed putting {method} on queue for cam @ {url_name}", e)
+
         # Todo get response...
         try:
+            print(f"Waiting for {method} from cam @ {url_name}")
             x = q_out.get(True, 2)
+            print(f"Recvd {x} for {method} from cam @ {url_name}")
             return x
         except:
-            print(f"Failed to get call_camera res for {url}/{method}")
+            print(f"Failed to get call_camera res for {url_name}/{method}")
 
     def remove_camera(self, url) -> bool:
         try:
@@ -456,7 +561,10 @@ class CameraManagement(metaclass=Singleton):
             return False
 
     def __del__(self):
-        for cam in self.cameras.values:
+        if len(self.cameras.values()) == 0:
+            return
+        for cam in self.cameras.values():
+            print("Deleting cam thread", cam)
             cam[2].join()
 
 

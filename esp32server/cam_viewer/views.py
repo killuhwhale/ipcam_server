@@ -1,35 +1,49 @@
 import json
 from asgiref.sync import sync_to_async
+from django.http import FileResponse
 from django.shortcuts import render
 # Create your views here.
 import requests
 from time import time
 import cv2
 
-from rest_framework import viewsets
+from rest_framework import renderers, viewsets
 from rest_framework import permissions
 from rest_framework.response import Response
+from rest_framework.request import Request
 from rest_framework.decorators import action
 
 
 from .serializers import ManageCameraSerializer
-from .ip_cam_manager import CameraManagement
-''' Home Assistant Esp 32 cams, not very reliable. 
-    cams = [
-        "camera.no_home_iphone",
-        "camera.cam1"
-    ]
-    endpoints = [
-        "camera_proxy_stream",
-        "camera_proxy"
-    ]
-    api_token = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJjYTU0NmIxNmIwMzc0ODFmYTYzOWRhNjk4ODY3MWQ2MyIsImlhdCI6MTY1NzYxMTExMywiZXhwIjoxOTcyOTcxMTEzfQ.jl1_fqUzpZHajYb2VKvn-GJ6NIDedNct09CLpwT_N3s"
-    headers = {
-        "Authorization": f"Bearer {api_token}",
-        "content-type": "application/json",
-    }
-    endpoint = f"/api/{endpoints[0]}/{cams[0]}?time={int(time()*1000)}"
+from .ip_cam_manager import CameraManagement, RECORD_DIR
+
 '''
+url: used to connect to  stream
+url_name: this is the camera name,  used in self.cameras and filenames
+
+Incoming urls should be: url and not url_name
+
+
+'''
+
+
+'''
+To implement a custom renderer, you should override BaseRenderer, set the .media_type and .format properties, and implement the .render(self, data, accepted_media_type=None, renderer_context=None) method.
+
+The method should return a bytestring, which will be used as the body of the HTTP response.
+
+'''
+
+
+class PassthroughRenderer(renderers.BaseRenderer):
+    """
+        Return data as-is. View should supply a Response.
+    """
+    media_type = '*/*'
+    format = ''
+
+    def render(self, data, accepted_media_type="", renderer_context=None):
+        return data
 
 
 class CameraViewSet(viewsets.ViewSet):
@@ -71,7 +85,7 @@ class CameraViewSet(viewsets.ViewSet):
         print(f'Toggling {request.data}')
         toggle_state = CameraManagement().call_camera(request.data, 'toggle_flash')
         print("Viewset, toggle flash res: ", toggle_state)
-        return Response(toggle_state)
+        return Response(toggle_state if toggle_state else False)
 
     @action(detail=False, methods=['post'])
     def start_recording(self, request, pk=None):
@@ -86,25 +100,53 @@ class CameraViewSet(viewsets.ViewSet):
         res = CameraManagement().call_camera(request.data, 'stop_manual_record')
         return Response(res)
 
+    @action(detail=False, methods=['get'])
+    def get_videos(self, request: Request, pk=None):
+        print(f'Getting files for {request.query_params}')
+        try:
+            url = request.query_params['url']
+            print("da url ", url)
+            res = CameraManagement().call_camera(url, 'get_videos')
+            return Response(res)
+        except Exception as e:
+            print(f"Can't find files w/ params: {request.query_params}")
+            print("Error: ", e.with_traceback())
 
-# def index(request):
-#     context = {
-#         'vars_for_template': True,
-#         "cam_urls": ["testURL1", "testURL2", "testURL3"],
-#         "cam_settings": {
-#             'testURL1': {
-#                 'h_flip': False,
-#             },
-#             'testURL2': {
-#                 'h_flip': False,
-#             },
-#             'testURL3': {
-#                 'h_flip': False,
-#             },
-#         }
-#     }
+        return Response([])
 
-#     # TODO Get camera urls,
-#     # TODO Get Settings for each camera
+    @action(detail=False, methods=['post'])
+    def remove_videos(self, request: Request, pk=None):
+        print(f'Removing files for {request.data}')
+        try:
+            filename = request.data['filename']
+            url = request.data['url']
+            res = CameraManagement().call_camera(url, 'remove_video',  data=filename)
+            return Response(res)
+        except Exception as e:
+            print(f"Failed to remove w/ data: {request.data}")
+            print("Error: ", e)
 
-#     return render(request, 'cam_viewer/index.html', context)
+        return Response("Failed to remove video")
+
+    @action(detail=False, methods=['get'], renderer_classes=(PassthroughRenderer,))
+    def download_video(self, request: Request, pk=None):
+        print(f'Downloading files for {request.query_params}')
+        try:
+            filename = request.query_params['filename']
+            video_path = f"{RECORD_DIR}/{filename}"
+            print(f"Path: {video_path}")
+            video = open(video_path, "rb")
+            video.seek(0, 2)
+            l = video.tell()
+            print(video)
+            video.seek(0, 0)
+            response = FileResponse(video, content_type='video/x-msvideo')
+            response['Content-Length'] = l
+            response['Content-Disposition'] = f'attachment; filename="{filename}"'
+
+            return response
+        except Exception as e:
+            print(f"Failed to download w/ data: {request.query_params}")
+            print("Error: ", e)
+
+        return Response("Failed to remove video")
