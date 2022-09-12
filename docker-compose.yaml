@@ -26,6 +26,7 @@ services:
   #     - db-net
 
   esp32server:
+
     restart: always
     container_name: djangoAPI
     # command : bash -c "python check_db.py --service-name db --ip db --port 3306 && 
@@ -37,28 +38,40 @@ services:
     build:
       context: ./esp32server/
       dockerfile: Dockerfile
+    image: killuhwhale/camserver_api:latest
+
+    volumes:
+      - apiVolume:/app/api/vol
+
     # ports : port1:port2 tells the container to listen to which port. Port1 can be any unoccupied port but port2 must be the port you would have used if you would be running your app on localhost. To maintain symmetry I have used the same port number on port1 and port2.
     ports:
       - "8000:8000"
+
     # depends_on:
     #   - db
     #   - redis
     networks:
       - db-net
-  # frontend:
-  #   restart: always
-  #   command : npm start
-  #   container_name: front
-  #   build:
-  #     context: ./frontend/
-  #     dockerfile: Dockerfile
-  #   ports:
-  #     - "3000:3000"
-  #   stdin_open: true
-  #   depends_on:
-  #     - project
-  #   networks:
-  #     - db-net
+  frontend:
+    restart: always
+    command: npm start
+
+    container_name: reactFront
+    build:
+      context: ./frontend/
+      dockerfile: Dockerfile
+    image: killuhwhale/camserver:latest
+    ports:
+      - "3000:3000"
+    stdin_open: true
+    depends_on:
+      - esp32server
+    networks:
+      - db-net
+
+volumes:
+  apiVolume:
+
 
 networks:
   db-net:

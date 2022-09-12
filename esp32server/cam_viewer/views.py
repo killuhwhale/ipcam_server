@@ -57,13 +57,16 @@ class CameraViewSet(viewsets.ViewSet):
 
         cameras = [ManageCameraSerializer(
             c).data for c in CameraManagement().list_cameras()]
+        print()
         return Response(cameras)
 
     def create(self, request):
         print("Creating new cam with data: ", request.data)
         print(request.data['url'])
-
+        if not request.data['url']:
+            return Response("No camera URL given")
         CameraManagement().add_camera(request.data['url'])
+        print()
         return Response(f"Loud and clear: {request.data}")
 
     def retrieve(self, request, pk=None):
@@ -107,11 +110,12 @@ class CameraViewSet(viewsets.ViewSet):
             url = request.query_params['url']
             print("da url ", url)
             res = CameraManagement().call_camera(url, 'get_videos')
+            print(res)
+            print("Done getting files \n")
             return Response(res)
         except Exception as e:
             print(f"Can't find files w/ params: {request.query_params}")
             print("Error: ", e.with_traceback())
-
         return Response([])
 
     @action(detail=False, methods=['post'])
@@ -121,6 +125,7 @@ class CameraViewSet(viewsets.ViewSet):
             filename = request.data['filename']
             url = request.data['url']
             res = CameraManagement().call_camera(url, 'remove_video',  data=filename)
+            print()
             return Response(res)
         except Exception as e:
             print(f"Failed to remove w/ data: {request.data}")
@@ -143,7 +148,7 @@ class CameraViewSet(viewsets.ViewSet):
             response = FileResponse(video, content_type='video/x-msvideo')
             response['Content-Length'] = l
             response['Content-Disposition'] = f'attachment; filename="{filename}"'
-
+            print()
             return response
         except Exception as e:
             print(f"Failed to download w/ data: {request.query_params}")

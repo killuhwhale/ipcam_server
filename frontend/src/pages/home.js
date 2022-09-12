@@ -12,9 +12,10 @@ import ActionCancelModal from "../comps/modals/actionCancelModal"
 const CAMERA_OFFLINE_IMG = "/offline_sn.png"
 
 const CameraFileRow = (props) => {
+    console.log("DISPLAY NAME", props.displayName)
     return (
         <Grid item xs={12} style={{ paddingLeft: "8px", }}>
-            <Typography variant='caption' color='secondary'> {props.displayName.split("_")[1]} </Typography>
+            <Typography variant='caption' color='secondary'> {props.displayName.split("_").slice(1).join("_")} </Typography>
 
 
             <Tooltip title='Download Video'>
@@ -23,7 +24,7 @@ const CameraFileRow = (props) => {
                 </IconButton>
             </Tooltip>
 
-            <Tooltip title='Delete Video' style={{ paddingLeft: "20vw" }}>
+            <Tooltip title='Delete Video' style={{ paddingLeft: "10vw" }}>
                 <IconButton onClick={() => props.onDeleteVideo(props.filename)}>
                     <RemoveCircle color='error' />
                 </IconButton>
@@ -57,7 +58,7 @@ class CameraVideos extends Component {
     async getFilenames() {
         console.log("getting video list for url: ", this.props.url)
         const filenames = await get(`${BASE_URL}/cameras/get_videos/?url=${encodeURIComponent(this.props.url)}`)
-
+        console.log("Filenames: ", filenames)
         this.setState({ filenames })
     }
 
@@ -98,7 +99,7 @@ class CameraVideos extends Component {
                 <Typography variant='caption' color='primary'>Recordings</Typography>
 
                 {Object.keys(this.state.filenames).length > 0 ?
-                    Object.keys(this.state.filenames).map(filename => {
+                    Object.keys(this.state.filenames).sort().map(filename => {
                         return (
                             <CameraFileRow filename={filename}
                                 displayName={this.state.filenames[filename]}
@@ -233,6 +234,9 @@ class HomePage extends Component {
     }
 
     addCamera(value) {
+        if (value.length === 0) {
+            alert("Invalid URL")
+        }
         post(`${BASE_URL}/cameras/`, { url: value })
             .then(res => {
                 this.getCameras()

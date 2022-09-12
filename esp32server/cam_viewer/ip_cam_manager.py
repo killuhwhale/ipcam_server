@@ -4,6 +4,7 @@ import json
 from multiprocessing import Queue, Process, Manager
 import os
 import re
+from cv2 import VideoCapture
 import requests
 import signal
 import sys
@@ -16,7 +17,8 @@ from .utils import Singleton
 # instead of running all these classes on the same thread, run on separate threads....
 # Then to call each method, send a command to run the comand.
 
-RECORD_DIR = "recordings"
+VOLUME = "/app/api/vol/"
+RECORD_DIR = f"{VOLUME}recordings"
 
 
 def name(url: str):
@@ -30,18 +32,19 @@ class CameraFiles:
             rf"{url_name}",  re.IGNORECASE | re.VERBOSE)
 
     def _add_date_to_filename(self, name):
-        #  192-168-0-181_1658366308.avi
+        #  192-168-0-181_TYPE_1658366308.avi
         new_name = name
         try:
             under_split = name.split("_")
-            dot_split = under_split[1].split(".")
+            dot_split = under_split[2].split(".")
 
             url = under_split[0]
+            rec_type = under_split[1]
             fileext = dot_split[1]
             ts = dot_split[0]
 
             date = datetime.fromtimestamp(int(ts))
-            new_name = f"{url}_{date.strftime('%d-%m-%Y-%-H:%M:%S')}.{fileext}"
+            new_name = f"{url}_{rec_type}_{date.strftime('%d-%m-%Y-%-H:%M:%S')}.{fileext}"
             print("New name: ", new_name)
         except Exception as e:
             print("Failed adding date to filename: ", e)
@@ -76,7 +79,7 @@ class CameraFiles:
 
 
 class ManageCamera:
-    CONFIG_PATH = "configs"
+    CONFIG_PATH = f"{VOLUME}configs"
     DEFAULT_CONFIG = {
         'flash': False,
     }
@@ -88,7 +91,7 @@ class ManageCamera:
 
     '''
 
-    def __init__(self, url, monitor, record, camera_files) -> None:
+    def __init__(self, url, monitor, record, record_manual, camera_files) -> None:
         self.url = url
         self.config = {}
         self.videos = []
@@ -100,12 +103,16 @@ class ManageCamera:
         self.monitor = None  # Process
         self.record_camera = record
         self.record = None  # Process
+        self.record_manual = record_manual
+        self.manual_record_proc = None  # Process
         self.url_name = name(self.url)
 
         self.config_path = f'{self.CONFIG_PATH}/{self.url_name}_config.json'
         self._q_manage = Queue()  # This class's queue so children can put messages on it
         # Record class's queue so this class or monitor class can put messages on it
         self._q_record = Queue()
+        self._q_manual_record = Queue()
+        self._q_manage_manual = Queue()
 
         # Currently have no need to send message to monitor
         self._q_monitor = Queue()
@@ -129,10 +136,10 @@ class ManageCamera:
             json.dump(self.config, f)
 
     def manual_record(self):
-        self._q_record.put("manual")
+        self._q_manual_record.put("manual")
         print("Put manual")
         try:
-            res = self._q_manage.get(True, 2)
+            res = self._q_manage_manual.get(True, 2)
             print("Started recording?", res)
             return res
         except:
@@ -140,9 +147,9 @@ class ManageCamera:
         return "Failed"
 
     def stop_manual_record(self):
-        self._q_record.put("stop_manual")
+        self._q_manual_record.put("stop_manual")
         try:
-            res = self._q_manage.get(True, 2)
+            res = self._q_manage_manual.get(True, 2)
             print("Stopped recording?", res)
             return res
         except:
@@ -176,6 +183,9 @@ class ManageCamera:
             with open(self.config_path, 'r') as f:
                 self.config = json.load(f)
         except:
+            if not os.path.isdir(self.CONFIG_PATH):
+                os.mkdir(self.CONFIG_PATH)
+
             with open(self.config_path, "w") as f:
                 json.dump(self.DEFAULT_CONFIG, f)
 
@@ -188,9 +198,14 @@ class ManageCamera:
         self.monitor = Process(
             target=self.monitor_camera.start, args=(self._q_record, self.url))
         self.monitor.start()
+
         self.record = Process(
-            target=self.record_camera.start, args=(self.url, self._q_record, self._q_manage))
+            target=self.record_camera.start_monitor, args=(self.url, self._q_record, self._q_manage))
         self.record.start()
+
+        self.manual_record_proc = Process(
+            target=self.record_manual.start_manual, args=(self.url, self._q_manual_record, self._q_manage_manual))
+        self.manual_record_proc.start()
 
         # TODO refine the calling to each method .
         # When putting a message on the queue, the message can get mixed up.
@@ -256,16 +271,22 @@ class RecordCamera:
         self.url = None
         self.url_name = None
         self.record_queue = None
-        self.cap = None
+        self.cap: VideoCapture = None
         self.manual_rec = False
         self.manage_queue = None
         self.video_endpoint = "video.mjpg"
         # Possibly make this a setting if network conditions affect recordings...
         self.rec_fps = 4
         self.record_dir = RECORD_DIR
+        self.record_type = None
+        self._create_record_dir()
+
+    def _create_record_dir(self):
+        if not os.path.isdir(RECORD_DIR):
+            os.mkdir(RECORD_DIR)
 
     def record_path(self):
-        return f'{self.record_dir}/{self.url_name}_{int(time())}.avi'
+        return f'{self.record_dir}/{self.url_name}_{self.record_type}_{int(time())}.avi'
 
     def get_writer(self):
         if self.is_rec and self.writer:
@@ -289,9 +310,41 @@ class RecordCamera:
             print("Checking cap ret is not opened: ", self.url, ret)
 
         ret, self.img = self.cap.read()
+        if not ret:
+            self.cap = cv2.VideoCapture(f"{self.url}/{self.video_endpoint}")
+
+        ret, self.img = self.cap.read()
         return ret
 
-    def start(self, url: str, record_queue: Queue, manage_queue: Queue):
+    def start_monitor(self, url: str, record_queue: Queue, manage_queue: Queue):
+        self.record_type = "motion"
+        self.url = url
+        self.url_name = name(url)
+        self.record_queue = record_queue
+        self.manage_queue = manage_queue
+        self.check_cap()
+        while True:
+            # If we have a detect, start recording or reset time
+            msg = self.check_detect()
+
+            if msg == 'motion':
+                print("Motion detected!!")
+                self.is_rec = True
+                self.start_time_elapsed = time()
+
+            if self.is_rec:
+                self.record()
+
+            if self.is_rec and time() - self.start_time_elapsed > self.REC_TIME:
+                self.is_rec = False
+                print("Stopping due to time_elapsed signal",
+                      time() - self.start_time_elapsed, self.REC_TIME)
+                self.stop_recording()
+            if self.is_rec:
+                print(f"Rec: {time() - self.start_time_elapsed}")
+
+    def start_manual(self, url: str, record_queue: Queue, manage_queue: Queue):
+        self.record_type = "manual"
         self.url = url
         self.url_name = name(url)
         self.record_queue = record_queue
@@ -320,21 +373,9 @@ class RecordCamera:
                     self.manage_queue.put("started")
                 continue
 
-            elif msg == 'motion':
-                if not self.is_rec:
-                    self.is_rec = True
-                else:
-                    print("Already recording...")
-                    self.start_time_elapsed = time()
-
             if self.is_rec:
                 self.record()
 
-            if self.is_rec and time() - self.start_time_elapsed > self.REC_TIME:
-                self.is_rec = False
-                print("Stopping due to time_elapsed signal",
-                      time() - self.start_time_elapsed, self.REC_TIME)
-                self.stop_recording()
             if self.is_rec:
                 print(f"Rec: {time() - self.start_time_elapsed}")
 
@@ -357,6 +398,7 @@ class RecordCamera:
     def stop_recording(self):
         print("Stopping the record!")
         self.writer = None
+        self.is_rec = False
 
 
 # Run on thread, when detecting motion, push msg on queue
@@ -365,6 +407,7 @@ class MonitorCamera:
     def __init__(self):
         self.avg = None
         self.video_endpoint = "video.mjpg"
+        self.monitoring = False
 
     def resize(self, img, scale):
         width = int(img.shape[1] * scale / 100)
@@ -376,6 +419,9 @@ class MonitorCamera:
         cap = cv2.VideoCapture(f"{url}/{self.video_endpoint}")
 
         while True:
+            if not self.monitoring:
+                continue
+
             ret, img = cap.read()
 
             # grab the raw NumPy array representing the image and initialize
@@ -418,7 +464,7 @@ class MonitorCamera:
                 # cv2.rectangle(img, (x, y), (x + w, y + h), (0, 255, 0), 2)
                 # print(f"Csize: {cv2.contourArea(c)}")
                 text = "Occupied"
-                queue.put("detect")
+                queue.put("motion")
 
             # draw the text and timestamp on the frame
             # timestamp = time() * 1000
@@ -447,13 +493,14 @@ class CameraManagement(metaclass=Singleton):
             we need to ask for it because it is not in a separate thread....
         
         '''
-        self.prev_connected_cam_filename = "prev_cams.txt"
+        self.prev_connected_cam_filename = f"{VOLUME}prev_cams.txt"
         self._get_prev_connected_cams()
 
         # Check config file for connected camers
 
     def _get_prev_connected_cams(self):
         # Open file
+        print("Current working dir: ", os.getcwd())
         urls = []
         try:
             with open(self.prev_connected_cam_filename, "r") as f:
@@ -473,11 +520,11 @@ class CameraManagement(metaclass=Singleton):
         for url_name in self.cameras.keys():
             # Access the output queue of the camera and wait 2 sec max for it to put a response
             try:
-                print("List cameras: ", url_name)
+                # print("List cameras: ", url_name)
                 info = self.call_camera(
                     None, 'get_info', data=None, url_name=url_name)
                 # dict: {flash: on/off, vid_path: ""}
-                print("Camera info: ", info)
+                # print("Camera info: ", info)
                 cams.append({
                     'url': info[1],
                     'config': info[0],
@@ -508,7 +555,7 @@ class CameraManagement(metaclass=Singleton):
             return
 
         cam = ManageCamera(url, MonitorCamera(),
-                           RecordCamera(), CameraFiles(url_name))
+                           RecordCamera(), RecordCamera(), CameraFiles(url_name))
         manager_queue_in = Queue()
         manager_queue_out = Queue()
         cam_thread = Thread(target=cam.begin, args=(
@@ -544,20 +591,33 @@ class CameraManagement(metaclass=Singleton):
             print(f"Failed to get call_camera res for {url_name}/{method}")
 
     def remove_camera(self, url) -> bool:
+        info = ""
         try:
-
             info = self.call_camera(url, 'get_info')
             os.remove(info[2])
-            del self.cameras[url]
-            camera_urls = self.cameras.keys()
+        except Exception as e:
+            print("Failed to remove config", e, info)
+            # return False
+
+        try:
             # Overwrite prev_cams.txt
-            os.remove("prev_cams.txt")
-            with open('prev_cams.txt', 'w') as f:
-                for url in camera_urls:
-                    f.write(f'{url}\n')
+            os.remove(f"{VOLUME}prev_cams.txt")
+        except Exception as e:
+            print('Failed to remove prev_cams', e)
+            return False
+
+        try:
+            print("Deleting url: ", url, self.cameras)
+            del self.cameras[name(url)]
+            camera_urls = self.cameras.keys()
+            print("Wiriting new file")
+            with open(f'{VOLUME}prev_cams.txt', 'w') as f:
+                print("Wiriting new url: ", _url)
+                for _url in camera_urls:
+                    f.write(f'{_url}\n')
             return True
         except Exception as e:
-            print(e)
+            print('Failed to remove camera from class and rewrite prev_urls', e)
             return False
 
     def __del__(self):
