@@ -1,6 +1,6 @@
-Home security system
+IP Camera Management & Recording
 
-Designed to grab IP Cameras.
+Designed to grab images IP Cameras.
 
 Allows user to manually record camera and record when motion is detected.
 
